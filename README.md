@@ -28,4 +28,13 @@ Open http://localhost:5173 and create a pass. Tap **Add to Google Wallet** on an
 
 ## Deploy
 
-[`render.yaml`](render.yaml) defines both services: the API as a Docker web service and the client as a static site. Use **New → Blueprint** in Render, then fill in the secrets. Each README has the details.
+GitHub Actions deploys both apps to your own server when you push to `main`:
+
+| Workflow | What it does |
+|---|---|
+| [`backend.yml`](.github/workflows/backend.yml) | Tests, then builds a multi-arch Docker image, pushes it to GHCR, and runs it on the server (`docker compose pull`, migrate, restart, health check) |
+| [`frontend.yml`](.github/workflows/frontend.yml) | Lints and builds, then rsyncs `dist/` to the server and reloads Nginx |
+
+Pull requests only run the checks. The required secrets and variables, the server's compose file and the Nginx config are in [server/README.md](server/README.md#cicd-github-actions--ghcr--your-server) and [client/README.md](client/README.md#cicd-github-actions--your-server).
+
+[`render.yaml`](render.yaml) is an alternative: a Render Blueprint for both services.

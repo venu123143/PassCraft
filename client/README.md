@@ -90,9 +90,73 @@ The zod schemas in `src/schemas/pass.schema.ts` mirror the server's DTO rules:
 
 Required labels show a red `*`, and errors appear in red under the field once it has been touched or the form is submitted.
 
+## CI/CD (GitHub Actions → your server)
+
+[`.github/workflows/frontend.yml`](../.github/workflows/frontend.yml) runs only when files under `client/` (or the workflow itself) change.
+
+| Trigger | build (lint, type-check, build) | deploy |
+|---|---|---|
+| Pull request to `main` | ✅ | – |
+| Push to `main` / manual run | ✅, and the `dist/` output is uploaded as an artifact | ✅ |
+
+**What deploy does:**
+
+1. Downloads the exact `dist/` that was built and tested.
+2. Connects over SSH with the host key checked: either pinned via a secret, or scanned at deploy time.
+3. Runs `rsync --delay-updates --delete-delay` into `FRONTEND_DEPLOY_PATH`. New files are swapped in at the end and stale files are removed afterwards, so visitors never get a half-uploaded site.
+4. Reloads Nginx.
+5. Optionally purges the Cloudflare cache.
+6. Smoke-tests the public URL.
+
+### Repository settings
+
+| Name | Kind | Required | Value |
+|---|---|---|---|
+| `VITE_API_BASE_URL` | variable | ✅ | Public API URL, e.g. `https://api.passcraft.example`. Baked into the bundle at build time. |
+| `SERVER_HOST`, `SERVER_USERNAME`, `SERVER_SSH_KEY` | secret | ✅ | Same SSH secrets as the backend pipeline |
+| `SERVER_PORT` | secret | | SSH port (default `22`) |
+| `SERVER_SSH_KNOWN_HOSTS` | secret | | Output of `ssh-keyscan -H <host>`. Pins the host key instead of trusting the first scan. |
+| `FRONTEND_DEPLOY_PATH` | variable | | Folder Nginx serves (default `/var/www/html/passcraft-web/dist`) |
+| `RELOAD_NGINX` | variable | | Set to `false` to skip `sudo systemctl reload nginx` |
+| `FRONTEND_URL` | variable | | Public site URL; if set, the job checks it serves the app |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ZONE_ID` | secret | | If both are set, the Cloudflare cache is purged. Use an API token with *Zone → Cache Purge* permission. |
+
+**On the server:**
+
+- The SSH user needs write access to `FRONTEND_DEPLOY_PATH`. For example: `sudo mkdir -p /var/www/html/passcraft-web/dist && sudo chown -R <user> /var/www/html/passcraft-web`.
+- The SSH user needs passwordless sudo for the Nginx reload only, e.g. in `/etc/sudoers.d/deploy`:
+
+  ```
+  <user> ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+  ```
+
+- Add the site's URL to the API's `CORS_ORIGINS`.
+
+### Nginx site config
+
+The app is a single-page app, so unknown paths must fall back to `index.html`. Hashed assets can be cached forever; `index.html` must not be cached:
+
+```nginx
+server {
+    listen 80;
+    server_name passcraft.example.com;
+    root /var/www/html/passcraft-web/dist;
+
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    location / {
+        add_header Cache-Control "no-cache";
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
 ## Deploy (Render static site)
 
-`render.yaml` in the repo root defines `passcraft-web` as a static site with an SPA rewrite.
+The CI/CD pipeline above is the main deployment path. As an alternative, `render.yaml` in the repo root defines `passcraft-web` as a Render static site with an SPA rewrite:
 
 1. Set `VITE_API_BASE_URL` to the API URL, e.g. `https://passcraft-api.onrender.com`.
 2. Add the site URL to the API's `CORS_ORIGINS`.

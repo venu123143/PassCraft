@@ -1,0 +1,194 @@
+name: Backend CI/CD
+
+# PRs to main: run tests and check that the Docker image builds (nothing is pushed).
+# Push to main: run tests, push a multi-arch image to GHCR, deploy it over SSH.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/backend.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/backend.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: backend-${{ github.ref }}
+  # Superseded PR runs are cancelled; runs on main always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: passcraft-api # → ghcr.io/<owner>/passcraft-api
+  NODE_VERSION: '24'
+
+jobs:
+  test:
+    name: Lint, type-check and test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: server
+    env:
+      DATABASE_URL: file:./data/ci.db
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci # postinstall runs `prisma generate`
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Apply migrations to a fresh database
+        run: npx prisma migrate deploy
+
+      - name: Lint
+        run: npm run lint:check
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test -- --ci
+
+      - name: E2E tests
+        run: npm run test:e2e -- --ci
+
+      - name: Build
+        run: npm run build
+
+  build-and-push:
+    name: Build and push image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve image name
+        id: image
+        # GHCR repository names must be lowercase.
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long,prefix=
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./server
+          push: ${{ github.event_name != 'pull_request' }}
+          # PRs only check that the image builds; amd64 alone keeps them fast.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+  deploy:
+    name: Deploy to server
+    needs: build-and-push
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read # lets GITHUB_TOKEN pull the image on the server
+    concurrency:
+      group: backend-deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Pull image, migrate and restart over SSH
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          # A PAT (read:packages) is optional; the job's own token works while the job runs.
+          GHCR_USER: ${{ secrets.GHCR_USERNAME || github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/var/www/html/passcraft' }}
+          SERVICE: ${{ vars.COMPOSE_SERVICE || 'passcraft-api' }}
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GHCR_USER,GHCR_TOKEN,DEPLOY_PATH,SERVICE,IMAGE
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+            cd "$DEPLOY_PATH"
+            echo "Deploying $IMAGE as compose service '$SERVICE' in $DEPLOY_PATH"
+            docker compose pull "$SERVICE"
+
+            # Run migrations before swapping containers: a failing migration stops the deploy
+            # and the old container keeps serving.
+            docker compose run --rm --no-deps "$SERVICE" ./node_modules/.bin/prisma migrate deploy
+
+            docker compose up -d --no-deps "$SERVICE"
+
+            # Wait for the image's HEALTHCHECK (GET /health) to pass.
+            CID="$(docker compose ps -q "$SERVICE")"
+            STATUS=unknown
+            for attempt in $(seq 1 24); do
+              STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CID")"
+              echo "[$attempt/24] $SERVICE is $STATUS"
+              case "$STATUS" in
+                healthy|running) break ;;
+                unhealthy|exited|dead) break ;;
+              esac
+              sleep 5
+            done
+
+            if [ "$STATUS" != healthy ] && [ "$STATUS" != running ]; then
+              echo "::error::$SERVICE did not become healthy (status: $STATUS)"
+              docker compose logs --tail 100 "$SERVICE"
+              exit 1
+            fi
+
+            docker compose images "$SERVICE"
+            docker image prune -f

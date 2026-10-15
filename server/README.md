@@ -20,9 +20,10 @@ Interactive API docs (Swagger) are served at **`/docs`** (OpenAPI JSON at `/docs
 5. [Run locally](#run-locally)
 6. [API usage](#api-usage)
 7. [Tests](#tests)
-8. [Deploy to Render](#deploy-to-render)
-9. [Adding another wallet platform (e.g. Apple Wallet)](#adding-another-wallet-platform-eg-apple-wallet)
-10. [Troubleshooting](#troubleshooting)
+8. [CI/CD (GitHub Actions → GHCR → your server)](#cicd-github-actions--ghcr--your-server)
+9. [Deploy to Render](#deploy-to-render)
+10. [Adding another wallet platform (e.g. Apple Wallet)](#adding-another-wallet-platform-eg-apple-wallet)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -241,6 +242,74 @@ npm run lint
 ```
 
 The tests don't need Google credentials or a database. The e2e suite replaces the ports with fakes in `test/fakes/`, which also demonstrates that the core runs against any adapter.
+
+---
+
+## CI/CD (GitHub Actions → GHCR → your server)
+
+The pipeline lives in [`.github/workflows/backend.yml`](../.github/workflows/backend.yml). It only runs when files under `server/` (or the workflow itself) change.
+
+```mermaid
+flowchart LR
+    T[test<br/>lint · typecheck · unit · e2e · build] --> B[build-and-push<br/>multi-arch image → GHCR]
+    B --> D[deploy<br/>SSH → pull → migrate → restart → health check]
+```
+
+| Trigger | test | build-and-push | deploy |
+|---|---|---|---|
+| Pull request to `main` | ✅ | builds `linux/amd64` only, **no push** | – |
+| Push to `main` | ✅ | pushes `linux/amd64` + `linux/arm64` | ✅ |
+| Manual (*Run workflow*) on `main` | ✅ | ✅ | ✅ |
+
+**Image:** `ghcr.io/<owner>/passcraft-api`, tagged `latest` (main), the full commit SHA, and the branch name.
+
+**What deploy does on the server:**
+
+1. Logs in to GHCR.
+2. Runs `docker compose pull <service>`.
+3. Runs `prisma migrate deploy` in a one-off container. If the migration fails, the deploy stops and the old container keeps running.
+4. Runs `docker compose up -d --no-deps <service>`.
+5. Waits for the image's `HEALTHCHECK` (`GET /health`) to report healthy. If it doesn't, the job prints the last 100 log lines and fails.
+6. Prunes dangling images and logs out of GHCR.
+
+### Repository settings
+
+*Settings → Secrets and variables → Actions*:
+
+| Name | Kind | Required | Value |
+|---|---|---|---|
+| `SERVER_HOST` | secret | ✅ | Server IP or hostname |
+| `SERVER_USERNAME` | secret | ✅ | SSH user (must be able to run `docker`) |
+| `SERVER_SSH_KEY` | secret | ✅ | Private key whose public key is in the server's `~/.ssh/authorized_keys` |
+| `SERVER_PORT` | secret | | SSH port (default `22`) |
+| `GHCR_USERNAME` / `GHCR_PAT` | secret | | GitHub user + token with `read:packages`. If unset, the job's own `GITHUB_TOKEN` is used to pull. |
+| `DEPLOY_PATH` | variable | | Folder on the server containing `docker-compose.yml` and `.env` (default `/var/www/html/passcraft`) |
+| `COMPOSE_SERVICE` | variable | | Compose service name (default `passcraft-api`) |
+
+The deploy job uses the `production` environment, so you can add required reviewers under *Settings → Environments*.
+
+### What the server's compose file needs
+
+The service must use the GHCR image, read the API's env vars, and keep the SQLite file on a volume so it survives redeploys:
+
+```yaml
+services:
+  passcraft-api:                       # = COMPOSE_SERVICE
+    image: ghcr.io/venu123143/passcraft-api:latest
+    env_file: .env                     # GOOGLE_*, DATABASE_URL=file:./data/passcraft.db, CORS_ORIGINS, …
+    ports: ["3000:3000"]
+    volumes:
+      - passcraft-data:/app/prisma/data
+    restart: unless-stopped
+volumes:
+  passcraft-data:
+```
+
+To run the same checks locally before pushing:
+
+```bash
+npm run lint:check && npm run typecheck && npm test && npm run test:e2e && npm run build
+```
 
 ---
 

@@ -26,5 +26,8 @@ COPY --from=build --chown=node:node /app/prisma ./prisma
 RUN mkdir -p prisma/data && chown -R node:node /app
 USER node
 EXPOSE 3000
+# Lets Docker / Compose report the container as healthy only once the API answers.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 # Apply pending migrations (creates the SQLite file on first boot), then start.
 CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node dist/main"]
