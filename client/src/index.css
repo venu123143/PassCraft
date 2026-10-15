@@ -1,0 +1,108 @@
+@import 'tailwindcss';
+@config '../tailwind.config.js';
+
+/* Dark mode is driven by a `.dark` class on <html> (set by ThemeProvider). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Palette: the interface stays nearly colourless so the pass card,
+ * in the same blue Google Wallet shows, is the one saturated object.
+ */
+:root {
+  color-scheme: light;
+  --background: #edf0f4; /* mist */
+  --surface: #ffffff;
+  --stage: #e1e6ed; /* panel the pass sits on */
+  --foreground: #172033; /* ink */
+  --muted: #e4e9f0;
+  --muted-foreground: #5a6478; /* slate */
+  --border: #d3dae3;
+  --input: #c4ccd8;
+  --ring: #1a73e8;
+  --primary: #1a73e8; /* wallet blue */
+  --primary-foreground: #ffffff;
+  --destructive: #c5221f;
+  --destructive-foreground: #ffffff;
+  --success: #137333;
+  --pass: #1a73e8;
+  --pass-foreground: #ffffff;
+  --pass-muted: rgb(255 255 255 / 0.72);
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #0d1320;
+  --surface: #151d2e;
+  --stage: #0a0f1a;
+  --foreground: #e7ebf3;
+  --muted: #1d2740;
+  --muted-foreground: #97a1b5;
+  --border: #26324a;
+  --input: #34415c;
+  --ring: #8ab4f8;
+  --primary: #5b9bf8;
+  --primary-foreground: #0d1320;
+  --destructive: #f28b82;
+  --destructive-foreground: #0d1320;
+  --success: #81c995;
+  --pass: #1a73e8;
+  --pass-foreground: #ffffff;
+  --pass-muted: rgb(255 255 255 / 0.72);
+}
+
+@layer base {
+  html {
+    @apply bg-background text-foreground antialiased;
+    font-family: theme(fontFamily.sans);
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply min-h-dvh;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: theme(fontFamily.display);
+    text-wrap: balance;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /* Hide number spinners: values are typed, and spinners steal width on mobile. */
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+}
+
+/* Smooth colour change when the theme toggles (not on first paint). */
+.theme-transition,
+.theme-transition * {
+  transition:
+    background-color 200ms ease,
+    border-color 200ms ease,
+    color 200ms ease !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

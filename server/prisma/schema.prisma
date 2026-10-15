@@ -1,0 +1,27 @@
+// Prisma schema for PassCraft.
+// To move to Postgres later, change `provider` to "postgresql" and point
+// DATABASE_URL at the new database; no application code needs to change.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Pass {
+  id           String   @id
+  uniquePassId String   @unique
+  name         String
+  label        String
+  value        Float
+  platform     String
+  saveUrl      String?
+  createdAt    DateTime
+  updatedAt    DateTime
+
+  @@map("passes")
+}
